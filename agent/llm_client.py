@@ -142,34 +142,57 @@ class LLMClient:
         temperature: float,
         tools: Optional[list[dict]] = None,
     ) -> str:
-        """Call Google Gemini API."""
+        """Call Google Gemini API (new google-genai SDK)."""
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
         except ImportError:
-            logger.error("google-generativeai not installed. pip install google-generativeai")
+            logger.error("google-genai not installed. pip install google-genai")
             return self._fallback_mock_response(messages)
 
-        genai.configure(api_key=self.config.api_key)
-
-        # Gemini uses a different message format
-        gemini_messages = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            gemini_messages.append({"role": role, "parts": [msg["content"]]})
-
         try:
-            gemini_model = genai.GenerativeModel(
-                model_name=model,
+            client = genai.Client(api_key=self.config.api_key)
+
+            # Build contents from messages
+            contents = []
+            for msg in messages:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append(types.Content(
+                    role=role,
+                    parts=[types.Part(text=msg["content"])],
+                ))
+
+            config = types.GenerateContentConfig(
                 system_instruction=system_prompt,
+                temperature=temperature,
+                max_output_tokens=self.config.max_tokens,
             )
-            response = await gemini_model.generate_content_async(
-                gemini_messages,
-                generation_config={
-                    "temperature": temperature,
-                    "max_output_tokens": self.config.max_tokens,
-                },
+
+            # If tools provided, configure function calling
+            if tools:
+                config.tools = [types.Tool(
+                    function_declarations=[t["function"] for t in tools]
+                )]
+
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
             )
-            return response.text
+
+            # Check for function calls
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.function_call:
+                        fc = part.function_call
+                        return json.dumps({
+                            "tool_call": {
+                                "name": fc.name,
+                                "arguments": dict(fc.args),
+                            }
+                        }, ensure_ascii=False)
+
+            return response.text or ""
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             return self._fallback_mock_response(messages)
