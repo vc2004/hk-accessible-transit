@@ -81,12 +81,14 @@ class AlertMonitorAgent:
         "DRL": "normal",
     }
 
-    def __init__(self, cfg: AgentConfig = config, api=None):
+    def __init__(self, cfg: AgentConfig = config, api=None, weather_api=None):
         self.config = cfg
         self._mcp_connected = False
         # TransitAPIClient for real MTR service status
         from .transit_api import TransitAPIClient
+        from .weather_api import WeatherAPIClient
         self.transit_api = api or TransitAPIClient()
+        self.weather_api = weather_api or WeatherAPIClient()
 
     # ------------------------------------------------------------------
     # Main API: check for alerts affecting a set of routes
@@ -215,60 +217,75 @@ class AlertMonitorAgent:
         routes: list[RouteOption],
         weather_sensitive: bool,
     ) -> list[Alert]:
-        """Check weather conditions from HKO via hko-mcp.
+        """Check real-time weather from Hong Kong Observatory API.
 
-        In production, this queries the hko-mcp server:
-            from mcp import ClientSession
-            async with stdio_client(hko_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    result = await session.call_tool("get_weather_warning", {})
+        Queries HKO open data for current conditions and active warnings.
+        Generates accessibility-specific alerts for route planning.
         """
         alerts: list[Alert] = []
 
-        # Static fallback: Hong Kong seasonal weather patterns
-        # In production, replaced entirely by hko-mcp real-time data
-        now = datetime.now()
+        try:
+            weather = await self.weather_api.get_current_weather()
+            warnings = await self.weather_api.get_warnings()
+            accessibility_alerts = self.weather_api.get_accessibility_alerts(weather, warnings)
 
-        # Rainy season (May-September): always flag outdoor segments
-        if 5 <= now.month <= 9:
-            for route in routes:
-                for seg_idx, segment in enumerate(route.segments):
-                    if segment.mode == "WALK":
-                        alerts.append(Alert(
-                            message=(
-                                f"🌧️ Rainy season (May-Sep): outdoor walking segment "
-                                f"({segment.from_stop} → {segment.to_stop}) may be wet. "
-                                f"Wheelchair users: wet surfaces increase slip risk."
-                            ),
-                            severity=AlertSeverity.WARNING,
-                            source="hko-mcp (seasonal)",
-                            affected_segment=seg_idx,
-                        ))
+            # Convert to Alert objects
+            for wa in accessibility_alerts:
+                sev = {"critical": AlertSeverity.CRITICAL, "warning": AlertSeverity.WARNING,
+                       "info": AlertSeverity.INFO}.get(wa["severity"], AlertSeverity.INFO)
+                alerts.append(Alert(
+                    message=wa["message"],
+                    severity=sev,
+                    source="hko-api (live)",
+                ))
 
-            # Also flag the need for weather check
-            alerts.append(Alert(
-                message=(
-                    "🌧️ Hong Kong rainy season. Check hko.gov.hk for current "
-                    "rainstorm or thunderstorm warnings before departing."
-                ),
-                severity=AlertSeverity.INFO,
-                source="hko-mcp",
-            ))
+            # Flag outdoor walking segments if rain is detected
+            if weather.rainfall > 0:
+                for route in routes:
+                    for seg_idx, segment in enumerate(route.segments):
+                        if segment.mode == "WALK":
+                            alerts.append(Alert(
+                                message=(
+                                    f"🌧️ Rain detected ({weather.rainfall}mm): outdoor "
+                                    f"walking segment ({segment.from_stop} → {segment.to_stop}) "
+                                    f"may be slippery. Wheelchair users: reduce speed on ramps."
+                                ),
+                                severity=AlertSeverity.WARNING,
+                                source="hko-api (live)",
+                                affected_segment=seg_idx,
+                            ))
 
-        # Heat warning (June-August)
-        if 6 <= now.month <= 8:
-            for route in routes:
-                for seg_idx, segment in enumerate(route.segments):
-                    if segment.mode == "WALK" and segment.duration_min > 5:
-                        alerts.append(Alert(
-                            message=(
-                                f"☀️ Summer heat: walking segment is "
-                                f"~{segment.duration_min} min. Stay hydrated. "
-                                f"Consider covered walkways where available."
-                            ),
-                            severity=AlertSeverity.INFO,
-                            source="hko-mcp (seasonal)",
-                            affected_segment=seg_idx,
-                        ))
+            # Flag heat for elderly
+            if weather.temperature >= 32:
+                for route in routes:
+                    for seg_idx, segment in enumerate(route.segments):
+                        if segment.mode == "WALK" and segment.duration_min > 5:
+                            alerts.append(Alert(
+                                message=(
+                                    f"☀️ High temperature ({weather.temperature}°C): "
+                                    f"walking segment ~{segment.duration_min} min. "
+                                    f"Elderly users: stay hydrated, use covered walkways."
+                                ),
+                                severity=AlertSeverity.WARNING,
+                                source="hko-api (live)",
+                                affected_segment=seg_idx,
+                            ))
+
+        except Exception as e:
+            logger.warning(f"HKO weather API unavailable: {e} — using seasonal fallback")
+            # Static seasonal fallback
+            now = datetime.now()
+            if 5 <= now.month <= 9:
+                alerts.append(Alert(
+                    message="🌧️ Rainy season — check hko.gov.hk for current warnings before departing.",
+                    severity=AlertSeverity.INFO,
+                    source="hko (seasonal fallback)",
+                ))
+            if 6 <= now.month <= 8:
+                alerts.append(Alert(
+                    message="☀️ Summer heat — stay hydrated. Use covered walkways where available.",
+                    severity=AlertSeverity.INFO,
+                    source="hko (seasonal fallback)",
+                ))
 
         return alerts

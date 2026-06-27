@@ -29,6 +29,7 @@ from .route_planner import RoutePlannerAgent, RouteOption
 from .accessibility_filter import AccessibilityFilterAgent, FilterResult
 from .alert_monitor import AlertMonitorAgent, Alert
 from .transit_api import TransitAPIClient
+from .weather_api import WeatherAPIClient
 from .mcp_tools import register_in_process_tools
 from .i18n import detect_language, get_lang_prompt
 
@@ -93,7 +94,9 @@ class OrchestratorAgent:
             cfg, api=self.transit_api, mcp_pool=self.mcp_pool,
         )
         self.accessibility_filter = AccessibilityFilterAgent(cfg)
-        self.alert_monitor = AlertMonitorAgent(cfg, api=self.transit_api)
+        self.alert_monitor = AlertMonitorAgent(
+            cfg, api=self.transit_api, weather_api=WeatherAPIClient(),
+        )
 
         # LLM client for response synthesis (auto-detects provider from env)
         self.llm = llm or LLMClient()

@@ -59,9 +59,11 @@ class RoutePlannerAgent(BaseAgent):
     - check_mode_accessibility: can this transport mode be used?
     """
 
-    def __init__(self, llm: LLMClient, transit_api: TransitAPIClient):
+    def __init__(self, llm: LLMClient, transit_api: TransitAPIClient, weather_api=None):
         super().__init__(name="RoutePlanner", llm=llm, tier="light")
         self.api = transit_api
+        from .weather_api import WeatherAPIClient
+        self.weather = weather_api or WeatherAPIClient()
 
     @property
     def system_prompt(self) -> str:
@@ -152,6 +154,29 @@ SIL (South Island), AEL (Airport Express), DRL (Disneyland Resort)."""
             {
                 "type": "function",
                 "function": {
+                    "name": "get_bus_eta",
+                    "description": "Get real-time KMB bus arrival times at a stop. Returns minutes until next buses and wheelchair accessibility status.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "route": {"type": "string", "description": "Bus route number (e.g. '74X', '271')"},
+                            "stop_id": {"type": "string", "description": "KMB stop ID (16-char hex). Use 'search_bus_routes' first to find routes, then look up stops."},
+                        },
+                        "required": ["route", "stop_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather_warnings",
+                    "description": "Get active Hong Kong weather warnings that may affect travel (typhoon, rainstorm, thunderstorm, heat). Returns alerts relevant for accessibility.",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "check_mode_accessibility",
                     "description": "Check whether a transport mode is wheelchair accessible.",
                     "parameters": {
@@ -190,6 +215,31 @@ SIL (South Island), AEL (Airport Express), DRL (Disneyland Resort)."""
                 arguments.get("from_area", ""),
                 arguments.get("to_area", ""),
             )
+
+        elif tool_name == "get_bus_eta":
+            eta = await self.api.get_kmb_eta(
+                arguments.get("stop_id", ""),
+                arguments.get("route", ""),
+            )
+            return json.dumps({
+                "route": eta.route,
+                "destination": eta.destination,
+                "arrivals_min": eta.arrivals,
+                "wheelchair_accessible": eta.wheelchair_accessible,
+            }, ensure_ascii=False)
+
+        elif tool_name == "get_weather_warnings":
+            weather = await self.weather.get_current_weather()
+            warnings = await self.weather.get_warnings()
+            alerts = self.weather.get_accessibility_alerts(weather, warnings)
+            summary = await self.weather.get_warning_summary()
+            return json.dumps({
+                "temperature": weather.temperature,
+                "rainfall_mm": weather.rainfall,
+                "humidity": weather.humidity,
+                "active_warnings": summary if summary else "No active weather warnings",
+                "accessibility_alerts": alerts,
+            }, ensure_ascii=False)
 
         elif tool_name == "check_mode_accessibility":
             return await self._check_mode(arguments["mode"])
