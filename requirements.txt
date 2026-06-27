@@ -1,0 +1,18 @@
+# HK Accessible Transit Navigator
+# Python dependencies
+#
+# Install: pip install -r requirements.txt
+
+# MCP SDK (Model Context Protocol)
+mcp>=1.0.0
+
+# LLM access (configurable — use either or both)
+# google-generativeai>=0.8.0   # For Gemini models
+# anthropic>=0.40.0            # For Claude models
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
+# Utilities
+python-dotenv>=1.0.0
