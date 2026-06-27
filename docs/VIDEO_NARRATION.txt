@@ -1,0 +1,20 @@
+Hong Kong's public transport is world-class.
+But for wheelchair users, elderly passengers, and visually impaired people, a simple journey can become impossible.
+Lift outages go unreported. Accessible information is scattered across PDFs and websites.
+No single service answers the question: can I get there, step-free, right now?
+
+A wheelchair user asks: Sha Tin to Central. The Route Planner Agent calls the MTR live API, searches station accessibility via MCP tools, identifies Admiralty as the interchange, and verifies lifts at both ends.
+
+The system auto-detects Traditional Chinese and responds in the same language with Hong Kong specific terminology.
+It even flags a real lift maintenance notice at Tai Po Market Exit B.
+
+Under the hood, three specialized agents. The Route Planner uses function calling to reason about which MCP tools to call. The Accessibility Filter is deterministic. It never uses an LLM for safety critical decisions. The Alert Monitor queries the Hong Kong Observatory live weather API for typhoon and rainstorm warnings.
+
+Two custom MCP servers provide eleven tools. Station search in English and Chinese. Real-time lift status. Bus route accessibility checks. And transport mode verification.
+Security is layered. PII masking. A two-tier policy server. And input sanitization blocking prompt injection attacks.
+
+Built in Python with the MCP SDK. Gemini and DeepSeek power the LLM reasoning with native function calling. Real MTR schedule data from Hong Kong open data API. Free, no key required. Live weather from the Observatory.
+
+Sixty unit tests. Thirty golden dataset evaluation cases covering all five accessibility profiles across Hong Kong regions. Evaluation driven development. The test cases were written before the accessibility rules.
+
+HK Accessible Transit Navigator. Making Hong Kong's world-class transport system accessible to everyone. Open source. Three languages. Built for the Kaggle AI Agents Capstone Project.
