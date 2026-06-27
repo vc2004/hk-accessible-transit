@@ -6,7 +6,8 @@
 # MCP SDK (Model Context Protocol)
 mcp>=1.0.0
 
-# LLM access (configurable — use either or both)
+# LLM access (pick any — or none for mock mode)
+openai>=1.0.0                  # For DeepSeek (OpenAI-compatible)
 # google-generativeai>=0.8.0   # For Gemini models
 # anthropic>=0.40.0            # For Claude models
 

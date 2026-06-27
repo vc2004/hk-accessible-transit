@@ -9,11 +9,19 @@ Implements the tool-use pattern from Day 2:
 - Falls back to static route data when MCP servers are unavailable
 """
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .config import AgentConfig, ROUTE_PLANNER_PROMPT, config
+from .transit_api import TransitAPIClient
+from .mcp_connector import MCPConnectionPool
+from .mcp_tools import register_in_process_tools
+
+# Register MCP tools at import time so all agent instances benefit
+register_in_process_tools()
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +181,15 @@ class RoutePlannerAgent:
         "airport": ["Arrivals Hall (lift to Terminal 2)"],
     }
 
-    def __init__(self, cfg: AgentConfig = config):
+    def __init__(
+        self,
+        cfg: AgentConfig = config,
+        api: Optional[TransitAPIClient] = None,
+        mcp_pool: Optional[MCPConnectionPool] = None,
+    ):
         self.config = cfg
+        self.api = api or TransitAPIClient()
+        self.mcp = mcp_pool or MCPConnectionPool()
         self._mcp_connected = False
 
     # ------------------------------------------------------------------
@@ -189,28 +204,221 @@ class RoutePlannerAgent:
     ) -> list[RouteOption]:
         """Find accessible routes from origin to destination.
 
-        First attempts to query MCP servers for real-time data.
-        Falls back to the static knowledge base if MCP is unavailable.
+        Tries three layers in order:
+        1. Real-time MTR API + MCP tools (live data)
+        2. Static knowledge base (known HK routes)
+        3. MTR-only fallback (best guess with caveats)
         """
         origin_key = origin.lower().strip()
         dest_key = destination.lower().strip()
+
+        # Layer 1: Try real APIs
+        routes = await self._query_live_data(origin_key, dest_key)
+        if routes:
+            logger.info(f"Live data routes for {origin_key} → {dest_key}: {len(routes)}")
+            return routes[:max_options]
+
+        # Layer 2: Static knowledge base
         query_key = (origin_key, dest_key)
-
-        # Try MCP servers first (the "goto" path for production)
-        if self._mcp_connected:
-            routes = await self._query_mcp_routes(origin_key, dest_key)
-            if routes:
-                return routes[:max_options]
-
-        # Fallback: static knowledge base
         routes = self._query_static_routes(query_key)
         if routes:
             logger.info(f"Static routes found for {origin_key} → {dest_key}")
             return routes[:max_options]
 
-        # Last resort: generate a best-guess route using MTR only
+        # Layer 3: MTR-only fallback
         logger.warning(f"No routes found for {origin_key} → {dest_key}, using MTR fallback")
         return [self._generate_mtr_only_route(origin, destination)]
+
+    async def _query_live_data(
+        self, origin: str, destination: str
+    ) -> list[RouteOption]:
+        """Query real transit APIs + MCP tools for live route data.
+
+        Step 1: Search MTR stations via MCP (mtr-accessibility)
+        Step 2: Get MTR schedule via HK gov API
+        Step 3: Check bus routes via MCP (hk-transit)
+        """
+        routes: list[RouteOption] = []
+
+        try:
+            # Step 1: Find MTR stations matching origin/destination
+            origin_stns = await self._find_mtr_station(origin)
+            dest_stns = await self._find_mtr_station(destination)
+
+            if origin_stns and dest_stns:
+                origin_stn = origin_stns[0]
+                dest_stn = dest_stns[0]
+                origin_code = origin_stn["code"]
+                dest_code = dest_stn["code"]
+
+                # Step 2: Try direct MTR connection
+                # Check if they're on the same line
+                common_lines = set(origin_stn.get("lines", [])) & set(dest_stn.get("lines", []))
+                if common_lines:
+                    line = list(common_lines)[0]
+                    # Map line name → API code
+                    line_map = {v: k for k, v in self.api.MTR_LINES.items()}
+                    line_code = line_map.get(line, "")
+
+                    if line_code:
+                        # Get real-time schedule
+                        schedule = await self.api.get_mtr_schedule(line_code, origin_code)
+                        arrival_min = schedule.arrivals_up[0] if schedule.arrivals_up else 5
+
+                        # Build route
+                        segment = RouteSegment(
+                            mode="MTR",
+                            from_stop=f"{origin_stn['name_en']} ({origin_code})",
+                            to_stop=f"{dest_stn['name_en']} ({dest_code})",
+                            route_code=line_code,
+                            duration_min=arrival_min + self._estimate_mtr_time(origin_code, dest_code, line_code),
+                            is_accessible=origin_stn.get("step_free", False) and dest_stn.get("step_free", False),
+                            instructions=(
+                                "Live MTR data. "
+                                f"Next train: {arrival_min} min. "
+                                f"Lift: {'Yes' if origin_stn.get('step_free') else 'Check mtr.com.hk'}"
+                            ),
+                            next_arrival_min=arrival_min,
+                        )
+
+                        route = RouteOption(
+                            segments=[segment],
+                            total_time_min=segment.duration_min,
+                            interchange_count=0,
+                        )
+                        routes.append(route)
+
+            # Step 3: Also check bus options via MCP
+            try:
+                bus_result = await self.mcp.call_tool(
+                    "hk-transit",
+                    "search_accessible_bus_routes",
+                    {"area_from": origin, "area_to": destination},
+                )
+                bus_data = json.loads(bus_result) if isinstance(bus_result, str) else bus_result
+                for bus_route in bus_data.get("routes", [])[:1]:
+                    if bus_route.get("wheelchair_accessible"):
+                        routes.append(RouteOption(
+                            segments=[RouteSegment(
+                                mode="CTB" if "ctb" in str(bus_route).lower() else "KMB",
+                                from_stop=bus_route.get("origin", origin),
+                                to_stop=bus_route.get("dest", destination),
+                                route_code=bus_route.get("route", ""),
+                                duration_min=25,
+                                is_accessible=True,
+                                instructions=f"Bus route {bus_route.get('route')} — low-floor vehicles",
+                            )],
+                            total_time_min=25,
+                            interchange_count=0,
+                        ))
+            except Exception as e:
+                logger.debug(f"Bus MCP query skipped: {e}")
+
+        except Exception as e:
+            logger.warning(f"Live data query failed: {e} — will use static fallback")
+
+        return routes
+
+    # ------------------------------------------------------------------
+    # Live data helpers
+    # ------------------------------------------------------------------
+
+    async def _find_mtr_station(self, place_name: str) -> list[dict]:
+        """Find MTR stations matching a place name using MCP tools.
+
+        Tries multiple approaches:
+        1. MCP tool 'search_station_by_name'
+        2. Direct match against known station list
+        3. MCP tool 'search_step_free_station'
+        """
+        matches = []
+
+        # Try MCP tool
+        try:
+            result = await self.mcp.call_tool(
+                "mtr-accessibility",
+                "search_station_by_name",
+                {"query": place_name},
+            )
+            data = json.loads(result) if isinstance(result, str) else result
+            matches = data.get("matches", [])
+            if matches:
+                return matches
+        except Exception:
+            pass
+
+        # Try hk-transit MCP
+        try:
+            result = await self.mcp.call_tool(
+                "hk-transit",
+                "search_station_by_name",
+                {"query": place_name},
+            )
+            data = json.loads(result) if isinstance(result, str) else result
+            matches = data.get("matches", [])
+            if matches:
+                return matches
+        except Exception:
+            pass
+
+        # Fallback: match against static station data
+        # Maps common place names → 3-letter station codes + metadata
+        STATIC_STATIONS = {
+            "tai po market": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"], self.get_lift_locations("tai po market")),
+            "tai po": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"], self.get_lift_locations("tai po market")),
+            "sha tin": ("SHT", "Sha Tin", "沙田", ["East Rail Line"], self.get_lift_locations("sha tin")),
+            "central": ("CEN", "Central", "中環", ["Tsuen Wan Line", "Island Line"], self.get_lift_locations("central")),
+            "admiralty": ("ADM", "Admiralty", "金鐘", ["East Rail Line", "Tsuen Wan Line", "Island Line", "South Island Line"], self.get_lift_locations("admiralty")),
+            "tsim sha tsui": ("TST", "Tsim Sha Tsui", "尖沙咀", ["Tsuen Wan Line"], self.get_lift_locations("tsim sha tsui")),
+            "mong kok": ("MOK", "Mong Kok", "旺角", ["Tsuen Wan Line", "Kwun Tong Line"], self.get_lift_locations("mong kok")),
+            "mong kok east": ("MKK", "Mong Kok East", "旺角東", ["East Rail Line"], self.get_lift_locations("mong kok")),
+            "causeway bay": ("CAB", "Causeway Bay", "銅鑼灣", ["Island Line"], self.get_lift_locations("causeway bay")),
+            "tuen mun": ("TUM", "Tuen Mun", "屯門", ["Tuen Ma Line"], self.get_lift_locations("tuen mun")),
+            "yuen long": ("YUL", "Yuen Long", "元朗", ["Tuen Ma Line"], self.get_lift_locations("yuen long")),
+            "diamond hill": ("DIH", "Diamond Hill", "鑽石山", ["Kwun Tong Line", "Tuen Ma Line"], self.get_lift_locations("diamond hill")),
+            "kwun tong": ("KWT", "Kwun Tong", "觀塘", ["Kwun Tong Line"], self.get_lift_locations("kwun tong")),
+            "kennedy town": ("KET", "Kennedy Town", "堅尼地城", ["Island Line"], self.get_lift_locations("kennedy town")),
+            "tsuen wan": ("TSW", "Tsuen Wan", "荃灣", ["Tsuen Wan Line"], self.get_lift_locations("tsuen wan")),
+        }
+
+        for key, (code, name_en, name_zh, lines, lifts) in STATIC_STATIONS.items():
+            if key in place_name or place_name in key:
+                matches.append({
+                    "code": code,
+                    "name_en": name_en,
+                    "name_zh": name_zh,
+                    "step_free": len(lifts) > 0,
+                    "lift_exits": lifts,
+                    "lines": lines,
+                })
+
+        return matches
+
+    def _estimate_mtr_time(
+        self, from_code: str, to_code: str, line_code: str
+    ) -> int:
+        """Estimate MTR travel time between two stations on the same line.
+
+        Approximation: ~2-3 min per station on the same line.
+        """
+        # Simple distance-based heuristic based on known station pairs
+        # Format: (from, to) → estimated minutes
+        known_times = {
+            ("tap", "adn"): 22, ("tap", "mkk"): 22, ("tap", "sht"): 6,
+            ("sht", "adn"): 18, ("sht", "mkk"): 12,
+            ("cen", "adn"): 3, ("cen", "tst"): 5, ("cen", "cab"): 8,
+            ("tst", "adn"): 3, ("tst", "cen"): 5,
+            ("mok", "adn"): 10, ("mok", "tst"): 7, ("mok", "cab"): 17,
+            ("tum", "tsw"): 15, ("tum", "yul"): 10,
+            ("dih", "kwt"): 7, ("dih", "mok"): 8,
+        }
+        key = (from_code.lower(), to_code.lower())
+        if key in known_times:
+            return known_times[key]
+        rev_key = (to_code.lower(), from_code.lower())
+        if rev_key in known_times:
+            return known_times[rev_key]
+        return 15  # Default estimate
 
     # ------------------------------------------------------------------
     # MCP queries (Day 2: standardized tool integration)

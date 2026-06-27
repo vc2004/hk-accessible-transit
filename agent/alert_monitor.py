@@ -81,9 +81,12 @@ class AlertMonitorAgent:
         "DRL": "normal",
     }
 
-    def __init__(self, cfg: AgentConfig = config):
+    def __init__(self, cfg: AgentConfig = config, api=None):
         self.config = cfg
         self._mcp_connected = False
+        # TransitAPIClient for real MTR service status
+        from .transit_api import TransitAPIClient
+        self.transit_api = api or TransitAPIClient()
 
     # ------------------------------------------------------------------
     # Main API: check for alerts affecting a set of routes
@@ -106,8 +109,8 @@ class AlertMonitorAgent:
         # Check 1: Lift/escalator outages (MTR accessibility)
         alerts.extend(self._check_lift_outages(routes))
 
-        # Check 2: MTR service status
-        alerts.extend(self._check_mtr_service(routes))
+        # Check 2: MTR service status (real API + static fallback)
+        alerts.extend(await self._check_mtr_service(routes))
 
         # Check 3: Weather (via hko-mcp or static fallback)
         alerts.extend(await self._check_weather(routes, weather_sensitive))
@@ -154,8 +157,11 @@ class AlertMonitorAgent:
 
         return alerts
 
-    def _check_mtr_service(self, routes: list[RouteOption]) -> list[Alert]:
-        """Check for MTR service disruptions on relevant lines."""
+    async def _check_mtr_service(self, routes: list[RouteOption]) -> list[Alert]:
+        """Check for MTR service disruptions on relevant lines.
+
+        Tries the real MTR API first, falls back to static status.
+        """
         alerts: list[Alert] = []
 
         # Collect all MTR lines used across all routes
@@ -165,6 +171,28 @@ class AlertMonitorAgent:
                 if segment.mode == "MTR" and segment.route_code:
                     lines_used.add(segment.route_code.upper())
 
+        # Try real API
+        try:
+            statuses = await self.transit_api.check_mtr_service_status()
+            for line_code in lines_used:
+                status = statuses.get(line_code, self._MTR_SERVICE_STATUS.get(line_code, "normal"))
+                if status == "disrupted":
+                    alerts.append(Alert(
+                        message=f"🚨 MTR {line_code} line is experiencing disruptions",
+                        severity=AlertSeverity.CRITICAL,
+                        source="mtr-service-status (live)",
+                    ))
+                elif status == "delayed":
+                    alerts.append(Alert(
+                        message=f"⚠️ MTR {line_code} line has delays",
+                        severity=AlertSeverity.WARNING,
+                        source="mtr-service-status (live)",
+                    ))
+            return alerts
+        except Exception:
+            logger.debug("Real MTR status check failed, using static fallback")
+
+        # Static fallback
         for line_code in lines_used:
             status = self._MTR_SERVICE_STATUS.get(line_code, "unknown")
             if status == "disrupted":

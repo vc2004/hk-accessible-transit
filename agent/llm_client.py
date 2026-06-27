@@ -22,12 +22,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+# Load .env file before anything else reads environment variables
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
 class Provider(Enum):
     GEMINI = "gemini"
     CLAUDE = "claude"
+    DEEPSEEK = "deepseek"
     MOCK = "mock"  # For testing without API keys
 
 
@@ -47,14 +55,21 @@ def get_config_from_env() -> LLMConfig:
 
     GEMINI_API_KEY → uses Gemini
     ANTHROPIC_API_KEY → uses Claude
-    If neither set, defaults to MOCK provider.
+    DEEPSEEK_API_KEY → uses DeepSeek
+    If none set, defaults to MOCK provider.
     """
     config = LLMConfig()
 
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
 
-    if gemini_key:
+    if deepseek_key:
+        config.provider = Provider.DEEPSEEK
+        config.api_key = deepseek_key
+        config.heavy_model = os.getenv("DEEPSEEK_HEAVY_MODEL", "deepseek-v4-flash")
+        config.light_model = os.getenv("DEEPSEEK_LIGHT_MODEL", "deepseek-v4-flash")
+    elif gemini_key:
         config.provider = Provider.GEMINI
         config.api_key = gemini_key
         config.heavy_model = os.getenv("GEMINI_HEAVY_MODEL", "gemini-2.5-pro")
@@ -108,6 +123,8 @@ class LLMClient:
             return await self._chat_gemini(messages, system_prompt, model, temp)
         elif self.config.provider == Provider.CLAUDE:
             return await self._chat_claude(messages, system_prompt, model, temp)
+        elif self.config.provider == Provider.DEEPSEEK:
+            return await self._chat_deepseek(messages, system_prompt, model, temp)
         else:
             return await self._chat_mock(messages, system_prompt, model, temp)
 
@@ -192,6 +209,47 @@ class LLMClient:
             return self._fallback_mock_response(messages)
 
     # ------------------------------------------------------------------
+    # DeepSeek backend
+    # ------------------------------------------------------------------
+
+    async def _chat_deepseek(
+        self,
+        messages: list[dict],
+        system_prompt: str,
+        model: str,
+        temperature: float,
+    ) -> str:
+        """Call DeepSeek API (OpenAI-compatible)."""
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            logger.error("openai not installed. pip install openai")
+            return self._fallback_mock_response(messages)
+
+        try:
+            client = AsyncOpenAI(
+                api_key=self.config.api_key,
+                base_url="https://api.deepseek.com",
+            )
+
+            # Build messages with system prompt
+            api_messages = []
+            if system_prompt:
+                api_messages.append({"role": "system", "content": system_prompt})
+            api_messages.extend(messages)
+
+            response = await client.chat.completions.create(
+                model=model,
+                messages=api_messages,
+                max_tokens=self.config.max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            logger.error(f"DeepSeek API error: {e}")
+            return self._fallback_mock_response(messages)
+
+    # ------------------------------------------------------------------
     # Mock backend (for development/testing without API keys)
     # ------------------------------------------------------------------
 
@@ -224,7 +282,7 @@ class LLMClient:
                 "   • Total time: ~25 min | Interchanges: 0\n\n"
                 "♿ All suggested routes are step-free. Please verify lift status\n"
                 "at mtr.com.hk before travelling.\n\n"
-                "[This is a mock response. Set GEMINI_API_KEY or ANTHROPIC_API_KEY for live LLM.]"
+                "[This is a mock response. Set DEEPSEEK_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY for live LLM.]"
             )
         elif "accessibility" in last_msg.lower():
             return (
@@ -234,7 +292,7 @@ class LLMClient:
                 "✅ Tactile guide paths available\n"
                 "✅ Audio announcements operational\n"
                 "⚠️ One lift under maintenance — use alternative exit\n\n"
-                "[This is a mock response. Set GEMINI_API_KEY or ANTHROPIC_API_KEY for live LLM.]"
+                "[This is a mock response. Set DEEPSEEK_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY for live LLM.]"
             )
         else:
             return (

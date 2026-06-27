@@ -24,9 +24,12 @@ from .config import (
     config,
 )
 from .llm_client import LLMClient, LLMConfig, get_config_from_env
+from .mcp_connector import MCPConnectionPool
 from .route_planner import RoutePlannerAgent, RouteOption
 from .accessibility_filter import AccessibilityFilterAgent, FilterResult
 from .alert_monitor import AlertMonitorAgent, Alert
+from .transit_api import TransitAPIClient
+from .mcp_tools import register_in_process_tools
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +79,20 @@ class OrchestratorAgent:
 
     def __init__(self, cfg: AgentConfig = config, llm: Optional[LLMClient] = None):
         self.config = cfg
-        self.route_planner = RoutePlannerAgent(cfg)
+
+        # Register in-process MCP tool handlers (no subprocess needed)
+        register_in_process_tools()
+
+        # Shared real-data infrastructure
+        self.transit_api = TransitAPIClient()
+        self.mcp_pool = MCPConnectionPool()
+
+        # Sub-agents with real data access
+        self.route_planner = RoutePlannerAgent(
+            cfg, api=self.transit_api, mcp_pool=self.mcp_pool,
+        )
         self.accessibility_filter = AccessibilityFilterAgent(cfg)
-        self.alert_monitor = AlertMonitorAgent(cfg)
+        self.alert_monitor = AlertMonitorAgent(cfg, api=self.transit_api)
 
         # LLM client for response synthesis (auto-detects provider from env)
         self.llm = llm or LLMClient()
@@ -268,7 +282,7 @@ class OrchestratorAgent:
             )
 
         # --- Phase 4: Synthesize Response ---
-        response.natural_response = self._synthesize_response(
+        response.natural_response = await self._synthesize_response(
             query=query,
             routes=accessible_routes,
             filter_results=filter_results,
@@ -282,7 +296,7 @@ class OrchestratorAgent:
     # Uses the HEAVY model when available, falls back to template.
     # ------------------------------------------------------------------
 
-    def _synthesize_response(
+    async def _synthesize_response(
         self,
         query: UserQuery,
         routes: list[RouteOption],
@@ -296,7 +310,7 @@ class OrchestratorAgent:
         """
         # If an LLM API key is set, use it for richer responses
         if self.llm.config.provider.value != "mock":
-            return self._synthesize_with_llm(
+            return await self._synthesize_with_llm(
                 query, routes, filter_results, alerts
             )
         # Otherwise use the deterministic template (shift intelligence left)
@@ -380,7 +394,7 @@ class OrchestratorAgent:
 
         return "".join(parts)
 
-    def _synthesize_with_llm(
+    async def _synthesize_with_llm(
         self,
         query: UserQuery,
         routes: list[RouteOption],
@@ -392,11 +406,7 @@ class OrchestratorAgent:
         Uses the HEAVY model to produce a natural, empathetic, and context-aware
         response. The structured data is provided as context; the LLM handles
         natural language generation.
-
-        NOTE: This is synchronous because the agent loop runs in async context.
-        Call with `asyncio.get_event_loop().run_until_complete()` if needed.
         """
-        import asyncio
 
         # Build structured context for the LLM
         route_data = []
@@ -455,27 +465,11 @@ Keep the response concise but thorough. If no route is fully accessible,
 explain why and suggest alternatives like Rehabus or station staff assistance."""
 
         try:
-            # Run the LLM call synchronously within the async context
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context — schedule and wait
-                response = asyncio.ensure_future(
-                    self.llm.chat(
-                        messages=[{"role": "user", "content": user_prompt}],
-                        system_prompt=SYSTEM_PROMPT,
-                        tier="heavy",
-                    )
-                )
-                # Can't await here — use a timeout workaround
-                # In a real async setup, this method would be async
-            else:
-                response = loop.run_until_complete(
-                    self.llm.chat(
-                        messages=[{"role": "user", "content": user_prompt}],
-                        system_prompt=SYSTEM_PROMPT,
-                        tier="heavy",
-                    )
-                )
+            response = await self.llm.chat(
+                messages=[{"role": "user", "content": user_prompt}],
+                system_prompt=SYSTEM_PROMPT,
+                tier="heavy",
+            )
             return response
         except Exception as e:
             logger.error(f"LLM synthesis failed, using template: {e}")
@@ -486,6 +480,10 @@ explain why and suggest alternatives like Rehabus or station staff assistance.""
     # ------------------------------------------------------------------
     # Session memory management (Day 1: Memory component)
     # ------------------------------------------------------------------
+
+    async def shutdown(self) -> None:
+        """Clean up MCP connections gracefully."""
+        await self.mcp_pool.stop_all()
 
     def start_session(self, session_id: str) -> None:
         """Initialize a new session for multi-turn conversation."""
