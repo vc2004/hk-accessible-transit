@@ -142,12 +142,18 @@ def hk_transit_call_tool(tool_name: str, arguments: dict) -> str:
         for code, station in MTR_STATIONS.items():
             if query in station["name_en"].lower() or query in station.get("name_zh", ""):
                 access = STATION_ACCESSIBILITY.get(code, {})
+                serving_lines = [
+                    info["name_en"]
+                    for line_code, info in MTR_LINES.items()
+                    if code in info["stations"]
+                ]
                 matches.append({
                     "code": code,
                     "name_en": station["name_en"],
                     "name_zh": station.get("name_zh", ""),
                     "step_free": access.get("step_free", False),
                     "lift_exits": access.get("lift_exits", []),
+                    "lines": serving_lines,
                 })
         return json.dumps({"matches": matches}, ensure_ascii=False, indent=2)
 
@@ -316,6 +322,33 @@ def mtr_accessibility_call_tool(tool_name: str, arguments: dict) -> str:
                 for code, info in STATIONS_WITHOUT_STEP_FREE.items()
             ],
         }, ensure_ascii=False, indent=2)
+
+    elif tool_name == "search_station_by_name":
+        query = arguments["query"].lower()
+        matches = []
+        for code, data in MTR_ACCESS_DB.items():
+            if query in data["station_name_en"].lower() or query in data.get("station_name_zh", ""):
+                matches.append({
+                    "code": code,
+                    "name_en": data["station_name_en"],
+                    "name_zh": data.get("station_name_zh", ""),
+                    "step_free": data.get("step_free", False),
+                    "lift_exits": [e["exit"] for e in data.get("lift_exits", [])
+                                   if e.get("status") == "normal"],
+                })
+        for code, data in STATIONS_WITHOUT_STEP_FREE.items():
+            if query in data["station_name_en"].lower() or query in data.get("station_name_zh", ""):
+                matches.append({
+                    "code": code,
+                    "name_en": data["station_name_en"],
+                    "name_zh": data.get("station_name_zh", ""),
+                    "step_free": False,
+                    "warning": data["reason"],
+                })
+        return json.dumps(
+            {"matches": matches} if matches else {"matches": []},
+            ensure_ascii=False, indent=2,
+        )
 
     elif tool_name == "search_step_free_station":
         location = arguments["location"].lower()

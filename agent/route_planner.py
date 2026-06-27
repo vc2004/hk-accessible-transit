@@ -251,42 +251,12 @@ class RoutePlannerAgent:
                 origin_code = origin_stn["code"]
                 dest_code = dest_stn["code"]
 
-                # Step 2: Try direct MTR connection
-                # Check if they're on the same line
-                common_lines = set(origin_stn.get("lines", [])) & set(dest_stn.get("lines", []))
-                if common_lines:
-                    line = list(common_lines)[0]
-                    # Map line name → API code
-                    line_map = {v: k for k, v in self.api.MTR_LINES.items()}
-                    line_code = line_map.get(line, "")
-
-                    if line_code:
-                        # Get real-time schedule
-                        schedule = await self.api.get_mtr_schedule(line_code, origin_code)
-                        arrival_min = schedule.arrivals_up[0] if schedule.arrivals_up else 5
-
-                        # Build route
-                        segment = RouteSegment(
-                            mode="MTR",
-                            from_stop=f"{origin_stn['name_en']} ({origin_code})",
-                            to_stop=f"{dest_stn['name_en']} ({dest_code})",
-                            route_code=line_code,
-                            duration_min=arrival_min + self._estimate_mtr_time(origin_code, dest_code, line_code),
-                            is_accessible=origin_stn.get("step_free", False) and dest_stn.get("step_free", False),
-                            instructions=(
-                                "Live MTR data. "
-                                f"Next train: {arrival_min} min. "
-                                f"Lift: {'Yes' if origin_stn.get('step_free') else 'Check mtr.com.hk'}"
-                            ),
-                            next_arrival_min=arrival_min,
-                        )
-
-                        route = RouteOption(
-                            segments=[segment],
-                            total_time_min=segment.duration_min,
-                            interchange_count=0,
-                        )
-                        routes.append(route)
+                # Step 2: Find MTR connection (direct or 1-change)
+                routes = await self._build_mtr_routes(
+                    origin_stn, dest_stn, origin_code, dest_code
+                )
+                if routes:
+                    return routes
 
             # Step 3: Also check bus options via MCP
             try:
@@ -324,65 +294,39 @@ class RoutePlannerAgent:
     # ------------------------------------------------------------------
 
     async def _find_mtr_station(self, place_name: str) -> list[dict]:
-        """Find MTR stations matching a place name using MCP tools.
+        """Find MTR stations matching a place name.
 
-        Tries multiple approaches:
-        1. MCP tool 'search_station_by_name'
-        2. Direct match against known station list
-        3. MCP tool 'search_step_free_station'
+        Tries static data first (includes line info), then MCP tools for
+        richer accessibility details.
         """
-        matches = []
-
-        # Try MCP tool
-        try:
-            result = await self.mcp.call_tool(
-                "mtr-accessibility",
-                "search_station_by_name",
-                {"query": place_name},
-            )
-            data = json.loads(result) if isinstance(result, str) else result
-            matches = data.get("matches", [])
-            if matches:
-                return matches
-        except Exception:
-            pass
-
-        # Try hk-transit MCP
-        try:
-            result = await self.mcp.call_tool(
-                "hk-transit",
-                "search_station_by_name",
-                {"query": place_name},
-            )
-            data = json.loads(result) if isinstance(result, str) else result
-            matches = data.get("matches", [])
-            if matches:
-                return matches
-        except Exception:
-            pass
-
-        # Fallback: match against static station data
-        # Maps common place names → 3-letter station codes + metadata
+        # Static station DB with line info (needed for route building)
         STATIC_STATIONS = {
-            "tai po market": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"], self.get_lift_locations("tai po market")),
-            "tai po": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"], self.get_lift_locations("tai po market")),
-            "sha tin": ("SHT", "Sha Tin", "沙田", ["East Rail Line"], self.get_lift_locations("sha tin")),
-            "central": ("CEN", "Central", "中環", ["Tsuen Wan Line", "Island Line"], self.get_lift_locations("central")),
-            "admiralty": ("ADM", "Admiralty", "金鐘", ["East Rail Line", "Tsuen Wan Line", "Island Line", "South Island Line"], self.get_lift_locations("admiralty")),
-            "tsim sha tsui": ("TST", "Tsim Sha Tsui", "尖沙咀", ["Tsuen Wan Line"], self.get_lift_locations("tsim sha tsui")),
-            "mong kok": ("MOK", "Mong Kok", "旺角", ["Tsuen Wan Line", "Kwun Tong Line"], self.get_lift_locations("mong kok")),
-            "mong kok east": ("MKK", "Mong Kok East", "旺角東", ["East Rail Line"], self.get_lift_locations("mong kok")),
-            "causeway bay": ("CAB", "Causeway Bay", "銅鑼灣", ["Island Line"], self.get_lift_locations("causeway bay")),
-            "tuen mun": ("TUM", "Tuen Mun", "屯門", ["Tuen Ma Line"], self.get_lift_locations("tuen mun")),
-            "yuen long": ("YUL", "Yuen Long", "元朗", ["Tuen Ma Line"], self.get_lift_locations("yuen long")),
-            "diamond hill": ("DIH", "Diamond Hill", "鑽石山", ["Kwun Tong Line", "Tuen Ma Line"], self.get_lift_locations("diamond hill")),
-            "kwun tong": ("KWT", "Kwun Tong", "觀塘", ["Kwun Tong Line"], self.get_lift_locations("kwun tong")),
-            "kennedy town": ("KET", "Kennedy Town", "堅尼地城", ["Island Line"], self.get_lift_locations("kennedy town")),
-            "tsuen wan": ("TSW", "Tsuen Wan", "荃灣", ["Tsuen Wan Line"], self.get_lift_locations("tsuen wan")),
+            "tai po market": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"]),
+            "tai po": ("TAP", "Tai Po Market", "大埔墟", ["East Rail Line"]),
+            "sha tin": ("SHT", "Sha Tin", "沙田", ["East Rail Line"]),
+            "central": ("CEN", "Central", "中環", ["Tsuen Wan Line", "Island Line"]),
+            "admiralty": ("ADM", "Admiralty", "金鐘", ["East Rail Line", "Tsuen Wan Line", "Island Line", "South Island Line"]),
+            "tsim sha tsui": ("TST", "Tsim Sha Tsui", "尖沙咀", ["Tsuen Wan Line"]),
+            "mong kok": ("MOK", "Mong Kok", "旺角", ["Tsuen Wan Line", "Kwun Tong Line"]),
+            "mong kok east": ("MKK", "Mong Kok East", "旺角東", ["East Rail Line"]),
+            "causeway bay": ("CAB", "Causeway Bay", "銅鑼灣", ["Island Line"]),
+            "tuen mun": ("TUM", "Tuen Mun", "屯門", ["Tuen Ma Line"]),
+            "yuen long": ("YUL", "Yuen Long", "元朗", ["Tuen Ma Line"]),
+            "diamond hill": ("DIH", "Diamond Hill", "鑽石山", ["Kwun Tong Line", "Tuen Ma Line"]),
+            "kwun tong": ("KWT", "Kwun Tong", "觀塘", ["Kwun Tong Line"]),
+            "kennedy town": ("KET", "Kennedy Town", "堅尼地城", ["Island Line"]),
+            "tsuen wan": ("TSW", "Tsuen Wan", "荃灣", ["Tsuen Wan Line"]),
+            "tai wai": ("TAW", "Tai Wai", "大圍", ["East Rail Line", "Tuen Ma Line"]),
+            "kowloon tong": ("KOT", "Kowloon Tong", "九龍塘", ["East Rail Line", "Kwun Tong Line"]),
+            "hung hom": ("HUH", "Hung Hom", "紅磡", ["East Rail Line", "Tuen Ma Line"]),
         }
 
-        for key, (code, name_en, name_zh, lines, lifts) in STATIC_STATIONS.items():
+        matches = []
+
+        # Try static data first (has line info needed for routing)
+        for key, (code, name_en, name_zh, lines) in STATIC_STATIONS.items():
             if key in place_name or place_name in key:
+                lifts = self.get_lift_locations(key)
                 matches.append({
                     "code": code,
                     "name_en": name_en,
@@ -391,6 +335,29 @@ class RoutePlannerAgent:
                     "lift_exits": lifts,
                     "lines": lines,
                 })
+
+        if matches:
+            return matches
+
+        # Try MCP tools for richer data
+        for server in ["hk-transit", "mtr-accessibility"]:
+            try:
+                result = await self.mcp.call_tool(
+                    server, "search_station_by_name", {"query": place_name},
+                )
+                data = json.loads(result) if isinstance(result, str) else result
+                mcp_matches = data.get("matches", [])
+                if mcp_matches:
+                    # Enrich with line info from static data if missing
+                    for m in mcp_matches:
+                        if "lines" not in m or not m.get("lines"):
+                            for key, (code, _, _, lines) in STATIC_STATIONS.items():
+                                if m.get("code") == code:
+                                    m["lines"] = lines
+                                    break
+                    return mcp_matches
+            except Exception:
+                pass
 
         return matches
 
@@ -419,6 +386,135 @@ class RoutePlannerAgent:
         if rev_key in known_times:
             return known_times[rev_key]
         return 15  # Default estimate
+
+    # ------------------------------------------------------------------
+    # MTR route builder — direct + 1-change interchange routing
+    # ------------------------------------------------------------------
+
+    async def _build_mtr_routes(
+        self,
+        origin_stn: dict,
+        dest_stn: dict,
+        origin_code: str,
+        dest_code: str,
+    ) -> list[RouteOption]:
+        """Build MTR routes between two stations — direct or with 1 interchange.
+
+        For direct connections: returns a single-segment route.
+        For cross-line journeys: finds an interchange station that serves
+        both a line from origin and a line to destination.
+        """
+        line_map = {v: k for k, v in self.api.MTR_LINES.items()}
+        origin_lines = set(origin_stn.get("lines", []))
+        dest_lines = set(dest_stn.get("lines", []))
+
+        # Try 1: Direct connection (same line)
+        common = origin_lines & dest_lines
+        if common:
+            line_name = list(common)[0]
+            line_code = line_map.get(line_name, "")
+            if line_code:
+                schedule = await self.api.get_mtr_schedule(line_code, origin_code)
+                arrival_min = schedule.arrivals_up[0] if schedule.arrivals_up else 5
+                travel_min = self._estimate_mtr_time(origin_code, dest_code, line_code)
+
+                return [RouteOption(
+                    segments=[RouteSegment(
+                        mode="MTR",
+                        from_stop=f"{origin_stn['name_en']} ({origin_code})",
+                        to_stop=f"{dest_stn['name_en']} ({dest_code})",
+                        route_code=line_code,
+                        duration_min=arrival_min + travel_min,
+                        is_accessible=origin_stn.get("step_free", False) and dest_stn.get("step_free", False),
+                        instructions=f"Live MTR. Next train {arrival_min}min. "
+                                     f"Lift: {'Yes' if origin_stn.get('step_free') else 'Check mtr.com.hk'}",
+                        next_arrival_min=arrival_min,
+                    )],
+                    total_time_min=arrival_min + travel_min,
+                    interchange_count=0,
+                )]
+
+        # Try 2: 1-change interchange (find a station on BOTH a line from
+        # origin and a line to destination)
+        interchange_stations = {
+            "Admiralty": ["East Rail Line", "Tsuen Wan Line", "Island Line", "South Island Line"],
+            "Central": ["Tsuen Wan Line", "Island Line"],
+            "Mong Kok": ["Tsuen Wan Line", "Kwun Tong Line"],
+            "Kowloon Tong": ["East Rail Line", "Kwun Tong Line"],
+            "Diamond Hill": ["Kwun Tong Line", "Tuen Ma Line"],
+            "Tai Wai": ["East Rail Line", "Tuen Ma Line"],
+            "Hung Hom": ["East Rail Line", "Tuen Ma Line"],
+            "Nam Cheong": ["Tung Chung Line", "Tuen Ma Line"],
+            "Yau Ma Tei": ["Tsuen Wan Line", "Kwun Tong Line"],
+            "Lai King": ["Tsuen Wan Line", "Tung Chung Line"],
+            "Quarry Bay": ["Island Line", "Tseung Kwan O Line"],
+            "Yau Tong": ["Kwun Tong Line", "Tseung Kwan O Line"],
+            "Prince Edward": ["Tsuen Wan Line", "Kwun Tong Line"],
+            "Sunny Bay": ["Tung Chung Line", "Disneyland Resort Line"],
+            "Tsing Yi": ["Tung Chung Line", "Airport Express"],
+            "Mei Foo": ["Tsuen Wan Line", "Tuen Ma Line"],
+            "Ho Man Tin": ["Kwun Tong Line", "Tuen Ma Line"],
+        }
+
+        best_route = None
+        best_time = 999
+
+        for interchange_name, interchange_lines in interchange_stations.items():
+            # Does origin reach this interchange on one of its lines?
+            reachable_from_origin = origin_lines & set(interchange_lines)
+            # Does this interchange reach destination on one of its lines?
+            reachable_to_dest = dest_lines & set(interchange_lines)
+
+            if reachable_from_origin and reachable_to_dest:
+                # Find the interchange station code
+                int_stns = await self._find_mtr_station(interchange_name)
+                if not int_stns:
+                    continue
+                int_code = int_stns[0]["code"]
+                int_step_free = int_stns[0].get("step_free", False)
+
+                line1_code = line_map.get(list(reachable_from_origin)[0], "")
+                line2_code = line_map.get(list(reachable_to_dest)[0], "")
+
+                if not line1_code or not line2_code:
+                    continue
+
+                # Segment 1: origin → interchange
+                seg1_time = self._estimate_mtr_time(origin_code, int_code, line1_code)
+                # Segment 2: interchange → destination
+                seg2_time = self._estimate_mtr_time(int_code, dest_code, line2_code)
+                total_time = seg1_time + seg2_time + 5  # +5 min interchange walking
+
+                if total_time < best_time:
+                    best_time = total_time
+                    best_route = RouteOption(
+                        segments=[
+                            RouteSegment(
+                                mode="MTR",
+                                from_stop=f"{origin_stn['name_en']} ({origin_code})",
+                                to_stop=f"{interchange_name} ({int_code})",
+                                route_code=line1_code,
+                                duration_min=seg1_time,
+                                is_accessible=origin_stn.get("step_free", False) and int_step_free,
+                                instructions=f"Take {line1_code} towards {interchange_name}. "
+                                             f"Lift: {'Yes' if origin_stn.get('step_free') else 'Check'}",
+                            ),
+                            RouteSegment(
+                                mode="MTR",
+                                from_stop=f"{interchange_name} ({int_code})",
+                                to_stop=f"{dest_stn['name_en']} ({dest_code})",
+                                route_code=line2_code,
+                                duration_min=seg2_time,
+                                is_accessible=int_step_free and dest_stn.get("step_free", False),
+                                instructions=f"Change at {interchange_name}. Take {line2_code} onwards. "
+                                             f"Lift: {'Yes' if int_step_free else 'Check'}",
+                            ),
+                        ],
+                        total_time_min=total_time,
+                        interchange_count=1,
+                    )
+
+        return [best_route] if best_route else []
 
     # ------------------------------------------------------------------
     # MCP queries (Day 2: standardized tool integration)

@@ -30,6 +30,7 @@ from .accessibility_filter import AccessibilityFilterAgent, FilterResult
 from .alert_monitor import AlertMonitorAgent, Alert
 from .transit_api import TransitAPIClient
 from .mcp_tools import register_in_process_tools
+from .i18n import detect_language, get_lang_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -465,9 +466,11 @@ Keep the response concise but thorough. If no route is fully accessible,
 explain why and suggest alternatives like Rehabus or station staff assistance."""
 
         try:
+            # Inject language context for Chinese queries
+            lang_prompt = get_lang_prompt(query.raw_text)
             response = await self.llm.chat(
                 messages=[{"role": "user", "content": user_prompt}],
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=SYSTEM_PROMPT + lang_prompt,
                 tier="heavy",
             )
             return response

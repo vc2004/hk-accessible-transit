@@ -104,6 +104,7 @@ class LLMClient:
         system_prompt: str = "",
         tier: str = "heavy",
         temperature: Optional[float] = None,
+        tools: Optional[list[dict]] = None,
     ) -> str:
         """Send a chat completion request and return the text response.
 
@@ -112,6 +113,7 @@ class LLMClient:
             system_prompt: System-level instruction
             tier: "heavy" (complex reasoning) or "light" (simple tasks)
             temperature: Override default temperature
+            tools: Optional OpenAI-format function definitions for tool calling
         """
         model = (
             self.config.heavy_model if tier == "heavy"
@@ -120,11 +122,11 @@ class LLMClient:
         temp = temperature if temperature is not None else self.config.temperature
 
         if self.config.provider == Provider.GEMINI:
-            return await self._chat_gemini(messages, system_prompt, model, temp)
+            return await self._chat_gemini(messages, system_prompt, model, temp, tools)
         elif self.config.provider == Provider.CLAUDE:
-            return await self._chat_claude(messages, system_prompt, model, temp)
+            return await self._chat_claude(messages, system_prompt, model, temp, tools)
         elif self.config.provider == Provider.DEEPSEEK:
-            return await self._chat_deepseek(messages, system_prompt, model, temp)
+            return await self._chat_deepseek(messages, system_prompt, model, temp, tools)
         else:
             return await self._chat_mock(messages, system_prompt, model, temp)
 
@@ -138,6 +140,7 @@ class LLMClient:
         system_prompt: str,
         model: str,
         temperature: float,
+        tools: Optional[list[dict]] = None,
     ) -> str:
         """Call Google Gemini API."""
         try:
@@ -181,6 +184,7 @@ class LLMClient:
         system_prompt: str,
         model: str,
         temperature: float,
+        tools: Optional[list[dict]] = None,
     ) -> str:
         """Call Anthropic Claude API."""
         try:
@@ -218,6 +222,7 @@ class LLMClient:
         system_prompt: str,
         model: str,
         temperature: float,
+        tools: Optional[list[dict]] = None,
     ) -> str:
         """Call DeepSeek API (OpenAI-compatible)."""
         try:
@@ -238,13 +243,34 @@ class LLMClient:
                 api_messages.append({"role": "system", "content": system_prompt})
             api_messages.extend(messages)
 
-            response = await client.chat.completions.create(
-                model=model,
-                messages=api_messages,
-                max_tokens=self.config.max_tokens,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content or ""
+            kwargs = {
+                "model": model,
+                "messages": api_messages,
+                "max_tokens": self.config.max_tokens,
+                "temperature": temperature,
+            }
+
+            # If tools are provided, use function calling
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            response = await client.chat.completions.create(**kwargs)
+
+            msg = response.choices[0].message
+
+            # If the model made a tool call, return it as JSON
+            if msg.tool_calls:
+                tool_call = msg.tool_calls[0]
+                return json.dumps({
+                    "tool_call": {
+                        "id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": json.loads(tool_call.function.arguments),
+                    }
+                }, ensure_ascii=False)
+
+            return msg.content or ""
         except Exception as e:
             logger.error(f"DeepSeek API error: {e}")
             return self._fallback_mock_response(messages)
@@ -259,6 +285,7 @@ class LLMClient:
         system_prompt: str,
         model: str,
         temperature: float,
+        tools: Optional[list[dict]] = None,
     ) -> str:
         """Mock LLM response for testing without API keys.
 

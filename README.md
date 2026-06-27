@@ -133,9 +133,12 @@ export ANTHROPIC_API_KEY="your-anthropic-api-key"
 # without an LLM — only the natural language synthesis is affected.
 ```
 
-### Run
+### Run Demo
 
 ```bash
+# Quick demo (English + 繁體中文 + 简体中文)
+python3.11 run_demo.py
+
 # Interactive CLI
 python3.11 -m agent.orchestrator
 
@@ -146,25 +149,59 @@ python3.11 -m evals.evaluator --dataset evals/test_cases.json
 python3.11 -m pytest tests/ -v
 ```
 
-### Example Usage
+### Example Output (English)
 
 ```
-> I need to go from Tai Po to Central. I use a wheelchair.
+Q: Sha Tin to Central, wheelchair
 
-Agent: I'll plan an accessible route from Tai Po to Central for you.
+♿ Accessible Route: Sha Tin → Central
+Best option: MTR only ✅
+Total time: ~35 minutes | Interchanges: 1 (Admiralty)
 
-Route options found:
+🚇 Segment-by-Segment:
+  1. Sha Tin (EAL) → Admiralty – 15 min, lift available ✅
+  2. Admiralty → Central (TWL) – 15 min, lift available ✅
 
-Option 1 (Recommended): MTR East Rail Line
-  • Board at Tai Po Market Station (lift available at Exit A)
-  • Alight at Admiralty Station (lift to concourse, then Exit E for
-    wheelchairs)
-  • 2 interchanges, all step-free
-  • ETA: 32 minutes
-  ⚠️ Note: Tai Po Market lift at Exit B is under maintenance until June 30.
-    Use Exit A instead.
+💡 Practical Tips:
+  • At Admiralty, follow wheelchair-accessible signs for the interchange
+  • At Central, lifts available from platform to all exits
+  • All stations and interchanges have lifts — no step-free gaps
+  • Consider Rehabus as fallback: call 2817 8154
+```
 
-Would you like me to check real-time lift status or weather conditions?
+### Example Output (繁體中文)
+
+```
+Q: 我係輪椅使用者，想由大埔墟去金鐘，要lift唔要樓梯
+
+♿ 無障礙路線：大埔墟 → 金鐘
+最佳選擇：東鐵綫直達 ✅
+總時間：約22分鐘 | 轉車次數：0
+
+🚇 詳細路線：
+  1. 大埔墟站（東鐵綫）→ 金鐘站 – 約22分鐘
+     升降機：大埔墟站A出口或C出口有𨋢 ✅
+
+⚠️ 注意：大埔墟站B出口升降機維修中（至2026年6月30日），請用A或C出口。
+```
+
+### Example Output (简体中文)
+
+```
+Q: 老人，从沙田去中环，走路不方便，请帮我找最轻松的路线
+
+👴 长者友好路线：沙田 → 中环
+最佳选择：东铁线换乘荃湾线
+总时间：约35分钟 | 换乘次数：1（金钟站）
+
+🚇 详细路线：
+  1. 沙田站（东铁线）→ 金钟站 – 约18分钟
+  2. 金钟站（荃湾线）→ 中环站 – 约5分钟
+
+💡 贴心提示：
+  • 所有车站都有升降机，全程无需上落楼梯
+  • 建议避开繁忙时间（朝8-9:30、晚5:30-7）
+  • 长者使用$2优惠计划，全程只需$2
 ```
 
 ## Project Structure
