@@ -9,9 +9,13 @@ from agent.config import AccessibilityProfile
 async def main():
     orchestrator = OrchestratorAgent()
 
+    from agent.llm_client import get_config_from_env
+    llm_config = get_config_from_env()
+    provider_name = {"deepseek": "DeepSeek", "gemini": "Gemini", "claude": "Claude", "mock": "Mock"}
+
     print("=" * 60)
     print("HK Accessible Transit Navigator ♿")
-    print("Multi-Agent System + DeepSeek LLM + Live MTR API")
+    print(f"Multi-Agent System + {provider_name.get(llm_config.provider.value, 'LLM')} + Live MTR & HKO API")
     print("=" * 60)
 
     demos = [

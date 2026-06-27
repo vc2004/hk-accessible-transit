@@ -108,8 +108,7 @@ User Query (Natural Language)
 ### Prerequisites
 
 - Python 3.11+
-- MCP SDK (`pip install mcp`)
-- Access to an LLM (Gemini API key or Claude API key)
+- An LLM API key (optional — works without one in mock mode)
 
 ### Install
 
@@ -119,19 +118,24 @@ cd hk-accessible-transit
 pip install -r requirements.txt
 ```
 
-### Configure LLM (optional — works without API key)
+### Configure LLM
+
+Tested and verified with both **DeepSeek** and **Gemini**. Copy `.env.template` to `.env` and fill in any ONE:
 
 ```bash
-# For Gemini (Google AI Studio)
-export GEMINI_API_KEY="your-gemini-api-key"
+# DeepSeek (tested with deepseek-v4-flash)
+DEEPSEEK_API_KEY=sk-your-key-here
 
-# Or for Claude (Anthropic Console)
-export ANTHROPIC_API_KEY="your-anthropic-api-key"
+# Gemini (tested with gemini-2.5-pro)
+GEMINI_API_KEY=your-gemini-key-here
 
-# Without either, the agent runs in mock mode with template-based responses.
-# All route planning, accessibility filtering, and security features work
-# without an LLM — only the natural language synthesis is affected.
+# Claude (supported, not yet tested)
+# ANTHROPIC_API_KEY=your-anthropic-key-here
 ```
+
+Without an API key, the agent runs in mock mode — all route planning,
+accessibility filtering, MCP tools, and security features work fully.
+Only the natural language response synthesis uses the LLM.
 
 ### Run Demo
 
