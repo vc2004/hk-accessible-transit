@@ -34,8 +34,8 @@ Thumbs.db
 
 # Kaggle submission (keep private until deadline)
 docs/KAGGLE_WRITEUP.md
+docs/video.html
+docs/voiceover.mp3
 
 # Project
 *.log
-voiceover.mp3
-docs/voiceover.mp3
